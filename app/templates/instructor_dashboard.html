@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% set title = "Clients" %}
+{% block content %}
+  <div class="toolbar">
+    <h2>Clients</h2>
+    <a href="#myclients" class="btn btn-ghost">My Clients <span class="badge">{{ my_clients_count }}</span></a>
+  </div>
+
+  <div class="grid two">
+    <section class="card">
+      <h3 class="section-title">Create Player</h3>
+      <form method="post" action="/players/create" enctype="multipart/form-data" class="form">
+        <label>Player Name</label>
+        <input name="name" required />
+        <label>Age</label>
+        <input name="age" type="number" min="7" max="30" value="12" required />
+        <label>Phone (for texts, optional)</label>
+        <input name="phone" placeholder="+15551234567"/>
+        <label>Player Image (optional)</label>
+        <input name="image" type="file" accept="image/*"/>
+        <button class="btn btn-red">Create</button>
+      </form>
+
+      <h3 class="section-title mt-2">Bulk Import CSV</h3>
+      <form method="post" action="/players/bulk_upload" enctype="multipart/form-data" class="form">
+        <input name="file" type="file" accept=".csv" required />
+        <button class="btn btn-red">Import</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h3 class="section-title">Drill Library (Instructor only)</h3>
+      <form method="post" action="/drills/create" class="form">
+        <label>Title</label>
+        <input name="title" required/>
+        <label>Description (optional)</label>
+        <textarea name="description" rows="2"></textarea>
+        <label>Video URL (YouTube/Vimeo or file link)</label>
+        <input name="video_url"/>
+        <button class="btn btn-red">Add Drill</button>
+      </form>
+    </section>
+  </div>
+
+  {% for bucket, arr in grouped.items() %}
+    <section class="card">
+      <h3 class="section-title">{{ bucket }}</h3>
+      <div class="roster">
+        {% for p, sessions, is_fav in arr %}
+          <a class="player-card" href="/instructor/player/{{ p.id }}">
+            <div class="avatar sm">
+              {% if p.image_path %}
+                <img src="{{ p.image_path }}" alt="{{ p.name }}"/>
+              {% else %}
+                <div class="avatar-placeholder">{{ p.name[0] }}</div>
+              {% endif %}
+            </div>
+            <div class="player-meta">
+              <div class="name">{{ p.name }}</div>
+              <div class="muted">Sessions: {{ p.metrics|length }}</div>
+            </div>
+            <button class="star" data-player="{{ p.id }}" aria-label="Favorite">
+              <span class="star-shape {% if is_fav %}on{% endif %}">★</span>
+            </button>
+          </a>
+        {% else %}
+          <div class="muted">No players in this group.</div>
+        {% endfor %}
+      </div>
+    </section>
+  {% endfor %}
+
+  <script>
+    // star toggles
+    document.querySelectorAll('.star').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const pid = btn.dataset.player;
+        const res = await fetch(`/favorite/${pid}`, { method: 'POST' });
+        const j = await res.json().catch(()=>({}));
+        const span = btn.querySelector('.star-shape');
+        if (j && j.favorited !== undefined) {
+          span.classList.toggle('on', j.favorited);
+        }
+      });
+    });
+  </script>
+{% endblock %}

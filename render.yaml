@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: hit4power-web
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: sqlite:////var/data/app.db
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: INSTRUCTOR_DEFAULT_CODE
+        value: change-me-1234
+      - key: BASE_URL
+        value: https://example.onrender.com
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1

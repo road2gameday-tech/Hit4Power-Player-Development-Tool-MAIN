@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% set title = "My Dashboard" %}
+{% block content %}
+  <div class="player-header card">
+    <div class="player-id">
+      <div class="avatar">
+        {% if player.image_path %}
+          <img src="{{ player.image_path }}" alt="{{ player.name }}"/>
+        {% else %}
+          <div class="avatar-placeholder">{{ player.name[0] }}</div>
+        {% endif %}
+      </div>
+      <div>
+        <h2 class="player-name">{{ player.name }}</h2>
+        <div class="muted">Login Code: {{ player.login_code }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="section-title">Exit Velocity Trend</h3>
+    <canvas id="evChart" height="180"></canvas>
+  </div>
+
+  <div class="grid two">
+    <section class="card">
+      <h3 class="section-title">Coach Notes</h3>
+      {% if shared_notes|length == 0 %}
+        <div class="muted">No notes yet.</div>
+      {% else %}
+        <ul class="list">
+          {% for n in shared_notes %}
+            <li>
+              <div class="note-text">{{ n.text }}</div>
+              <div class="note-meta">{{ n.created_at|datetimeformat }}</div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h3 class="section-title">Assigned Drills</h3>
+      {% if drills|length == 0 %}
+        <div class="muted">No assigned drills yet.</div>
+      {% else %}
+        <ul class="list">
+          {% for d in drills %}
+            <li>
+              <div class="note-text">
+                <strong>{{ d.drill.title }}</strong><br/>
+                {% if d.drill.video_url %}
+                  <a class="a-red" href="{{ d.drill.video_url }}" target="_blank" rel="noopener">Watch</a>
+                {% endif %}
+                {% if d.note %}<div class="muted">{{ d.note }}</div>{% endif %}
+              </div>
+              <div class="note-meta">{{ d.created_at|datetimeformat }}</div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  </div>
+
+  <script>
+    const labels = {{ dates|tojson }};
+    const data = {{ exitv|tojson }};
+    const ctx = document.getElementById('evChart').getContext('2d');
+    if (ctx) {
+      new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets: [{ label: 'Exit Velocity', data, tension: 0.2 }]},
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: getComputedStyle(document.documentElement).getPropertyValue('--text') } } },
+          scales: {
+            x: { ticks: { color: getComputedStyle(document.documentElement).getPropertyValue('--muted') } },
+            y: { ticks: { color: getComputedStyle(document.documentElement).getPropertyValue('--muted') } }
+          }
+        }
+      });
+    }
+  </script>
+{% endblock %}

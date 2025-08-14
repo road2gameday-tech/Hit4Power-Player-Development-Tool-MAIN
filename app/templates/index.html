@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% set title = "Login" %}
+{% block content %}
+  <div class="grid two">
+    <section class="card">
+      <h2>Player Login</h2>
+      <form method="post" action="/login/player" class="form">
+        <label>Login Code</label>
+        <input name="code" required placeholder="P-XXXXXX" />
+        <button class="btn btn-red" type="submit">Login</button>
+      </form>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Instructor Login</h2>
+      <form method="post" action="/login/instructor" class="form">
+        <label>Instructor Code</label>
+        <input name="code" required placeholder="Your code" />
+        <button class="btn btn-red" type="submit">Login</button>
+      </form>
+      <p class="mt-1 small muted">Default code is set by env var <code>INSTRUCTOR_DEFAULT_CODE</code>.</p>
+    </section>
+  </div>
+{% endblock %}
