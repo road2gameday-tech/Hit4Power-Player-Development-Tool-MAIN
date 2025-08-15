@@ -122,10 +122,13 @@ def list_players(db: Session) -> List[Dict[str, Any]]:
 def healthz():
     return JSONResponse({"ok": True, "time": datetime.utcnow().isoformat()})
 
+from fastapi import Request
+from fastapi.responses import HTMLResponse
+
 @app.get("/", response_class=HTMLResponse)
-def root():
-    # This redirect is intentional; change here if you'd like a landing page instead.
-    return RedirectResponse(url="/instructor")
+def home(request: Request):
+    return render("home.html", request)  # uses your existing render() helper
+
 
 @app.get("/logout")
 def logout(request: Request):
