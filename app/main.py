@@ -16,9 +16,10 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, DateTime, ForeignKey, Text, select, UniqueConstraint
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+from sqlalchemy.exc import OperationalError
 
 # ------------------------------------------------------------------------------
-# Config
+# Paths & config
 # ------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -34,7 +35,7 @@ TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM = os.getenv("TWILIO_FROM_NUMBER")
 
 # ------------------------------------------------------------------------------
-# App + Middleware
+# App
 # ------------------------------------------------------------------------------
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -57,17 +58,16 @@ class Instructor(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
     login_code = Column(String(64), unique=True, nullable=False)
-    players = relationship("Player", back_populates="instructor")
 
 class Player(Base):
     __tablename__ = "players"
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
     login_code = Column(String(64), unique=True, nullable=False)
+    # Keep these if they already exist in your DB; we handle missing columns gracefully.
     phone = Column(String(32), nullable=True)
     photo_url = Column(String(500), nullable=True)
-    instructor_id = Column(Integer, ForeignKey("instructors.id"), nullable=True)
-    instructor = relationship("Instructor", back_populates="players")
+
     notes = relationship("CoachNote", back_populates="player", cascade="all, delete-orphan")
     drills = relationship("Drill", back_populates="player", cascade="all, delete-orphan")
     metrics = relationship("PlayerMetric", back_populates="player", cascade="all, delete-orphan")
@@ -116,11 +116,11 @@ def get_db():
         db.close()
 
 # ------------------------------------------------------------------------------
-# Rendering helper — ALWAYS inject session
+# Rendering helper — ALWAYS inject `session`
 # ------------------------------------------------------------------------------
 def render(name: str, request: Request, **ctx):
     ctx.setdefault("request", request)
-    ctx.setdefault("session", request.session)  # <-- key line; templates can use session.get(...)
+    ctx.setdefault("session", request.session)
     return templates.TemplateResponse(name, ctx)
 
 # ------------------------------------------------------------------------------
@@ -131,6 +131,7 @@ def ensure_instructor_in_session(request: Request, db: Session) -> int:
     iid = request.session.get("instructor_id")
     if iid:
         return iid
+    # Bootstrap a default instructor so the UI works without manual seeding.
     inst = db.query(Instructor).filter_by(login_code="DEFAULT").first()
     if not inst:
         inst = Instructor(name="Coach", login_code="DEFAULT")
@@ -139,7 +140,7 @@ def ensure_instructor_in_session(request: Request, db: Session) -> int:
     return inst.id
 
 # ------------------------------------------------------------------------------
-# Routes
+# Root & health
 # ------------------------------------------------------------------------------
 @app.head("/", response_class=PlainTextResponse)
 def head_root():
@@ -149,7 +150,13 @@ def head_root():
 def root():
     return RedirectResponse("/instructor", status_code=HTTP_302_FOUND)
 
-# ---- Login (forms are embedded in your pages) --------------------------------
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz():
+    return PlainTextResponse("ok")
+
+# ------------------------------------------------------------------------------
+# Logins (forms are embedded in your pages)
+# ------------------------------------------------------------------------------
 @app.post("/login/instructor")
 def login_instructor(request: Request, code: str = Form(...), db: Session = Depends(get_db)):
     code = (code or "").strip()
@@ -174,18 +181,44 @@ def login_player(request: Request, code: str = Form(...), db: Session = Depends(
     request.session["flash"] = f"Welcome, {player.name}!"
     return RedirectResponse(f"/player/{player.id}", status_code=HTTP_302_FOUND)
 
-# ---- Instructor list (Clients) -----------------------------------------------
+# ------------------------------------------------------------------------------
+# Instructor dashboard (Clients)
+# ------------------------------------------------------------------------------
 @app.get("/instructor", response_class=HTMLResponse)
 def instructor_view(request: Request, db: Session = Depends(get_db)):
     instructor_id = ensure_instructor_in_session(request, db)
 
-    rows = db.execute(
-        select(Player.id, Player.name, Player.photo_url, Player.phone, Player.instructor_id)
-    ).all()
-    players = [
-        {"id": pid, "name": name, "photo_url": photo, "phone": phone, "instructor_id": iid}
-        for (pid, name, photo, phone, iid) in rows
+    # Be defensive about older DBs that may miss optional columns like phone/photo_url.
+    players: List[dict] = []
+    tried = [
+        (Player.id, Player.name, Player.photo_url, Player.phone),
+        (Player.id, Player.name, Player.photo_url),
+        (Player.id, Player.name),
     ]
+    last_err: Optional[Exception] = None
+    for sel in tried:
+        try:
+            rows = db.execute(select(*sel)).all()
+            for row in rows:
+                data = {"id": row[0], "name": row[1]}
+                # Safely attach optional fields:
+                if len(row) >= 3:
+                    data["photo_url"] = row[2]
+                else:
+                    data["photo_url"] = None
+                if len(row) >= 4:
+                    data["phone"] = row[3]
+                else:
+                    data["phone"] = None
+                players.append(data)
+            break
+        except OperationalError as e:
+            last_err = e
+            players = []
+            continue
+    if not players and last_err:
+        # Surface a friendly message but keep the page alive.
+        request.session["flash"] = "Your player table is from an older version. Page loaded without some fields."
 
     fav_ids = {pid for (pid,) in db.execute(
         select(Favorite.player_id).where(Favorite.instructor_id == instructor_id)
@@ -195,14 +228,15 @@ def instructor_view(request: Request, db: Session = Depends(get_db)):
 
     ctx = {
         "players": players,
-        "clients": players,                 # alias for templates
+        "clients": players,
         "my_clients": [p for p in players if p["starred"]],
         "flash": request.session.pop("flash", None),
     }
-    # Force the list template to avoid accidentally rendering a detail file:
     return render("dashboard.html", request, **ctx)
 
-# ---- Player detail (for instructor or player) --------------------------------
+# ------------------------------------------------------------------------------
+# Player detail (instructor & player)
+# ------------------------------------------------------------------------------
 @app.get("/player/{player_id}", response_class=HTMLResponse)
 def player_dashboard(player_id: int, request: Request, db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
@@ -233,8 +267,10 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
 
     ctx = {
         "player": {
-            "id": player.id, "name": player.name,
-            "photo_url": player.photo_url, "phone": player.phone,
+            "id": player.id,
+            "name": player.name,
+            "photo_url": getattr(player, "photo_url", None),
+            "phone": getattr(player, "phone", None),
             "login_code": player.login_code,
         },
         "chart_labels": labels,
@@ -243,10 +279,12 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
         "drills": [{"title": t, "file_path": f, "created_at": c} for (t, f, c) in drills],
         "flash": request.session.pop("flash", None),
     }
-    # Your detail template filename:
+    # Your template name:
     return render("instructor_player_detail.html", request, **ctx)
 
-# ---- Create player ------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Create player
+# ------------------------------------------------------------------------------
 @app.post("/player/create")
 async def create_player(
     request: Request,
@@ -256,7 +294,7 @@ async def create_player(
     photo: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
-    instructor_id = ensure_instructor_in_session(request, db)
+    # No instructor_id stored on players — starring uses the favorites table.
     photo_url = None
     if photo and photo.filename:
         photo_url = save_file(photo, "player_photos")
@@ -266,7 +304,6 @@ async def create_player(
         login_code=login_code.strip(),
         phone=(phone or "").strip() or None,
         photo_url=photo_url,
-        instructor_id=instructor_id,
     )
     db.add(p)
     try:
@@ -277,7 +314,9 @@ async def create_player(
     request.session["flash"] = f"Player {p.name} created."
     return RedirectResponse("/instructor", status_code=HTTP_302_FOUND)
 
-# ---- Star / Unstar ------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Star / Unstar (My Clients)
+# ------------------------------------------------------------------------------
 @app.post("/player/{player_id}/star")
 def toggle_star(player_id: int, request: Request, db: Session = Depends(get_db)):
     instructor_id = ensure_instructor_in_session(request, db)
@@ -288,10 +327,11 @@ def toggle_star(player_id: int, request: Request, db: Session = Depends(get_db))
     db.add(Favorite(instructor_id=instructor_id, player_id=player_id)); db.commit()
     return JSONResponse({"ok": True, "starred": True, "player_id": player_id})
 
-# ---- Coach notes --------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Coach notes
+# ------------------------------------------------------------------------------
 @app.post("/player/{player_id}/notes")
 def add_note(player_id: int, request: Request, text: str = Form(...), db: Session = Depends(get_db)):
-    ensure_instructor_in_session(request, db)
     player = db.get(Player, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -300,7 +340,9 @@ def add_note(player_id: int, request: Request, text: str = Form(...), db: Sessio
     request.session["flash"] = "Note added."
     return RedirectResponse(f"/player/{player_id}", status_code=HTTP_302_FOUND)
 
-# ---- Upload drill -------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Upload drill
+# ------------------------------------------------------------------------------
 @app.post("/player/{player_id}/drills")
 async def upload_drill(
     player_id: int,
@@ -309,7 +351,6 @@ async def upload_drill(
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
-    ensure_instructor_in_session(request, db)
     player = db.get(Player, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -319,7 +360,9 @@ async def upload_drill(
     request.session["flash"] = "Drill uploaded."
     return RedirectResponse(f"/player/{player_id}", status_code=HTTP_302_FOUND)
 
-# ---- Text player (Twilio optional) -------------------------------------------
+# ------------------------------------------------------------------------------
+# Text player (Twilio optional)
+# ------------------------------------------------------------------------------
 def _twilio_send(to_phone: str, body: str) -> bool:
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
         return False
@@ -335,11 +378,13 @@ def text_player(player_id: int, request: Request, message: str = Form(...), db: 
     player = db.get(Player, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
-    ok = bool(player.phone) and _twilio_send(player.phone, message.strip())
+    ok = bool(getattr(player, "phone", None)) and _twilio_send(player.phone, message.strip())
     request.session["flash"] = f"Text sent to {player.name}." if ok else "Text service not configured or no phone."
     return RedirectResponse(f"/player/{player_id}", status_code=HTTP_302_FOUND)
 
-# ---- Quick metric (demo) ------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Quick metric (demo)
+# ------------------------------------------------------------------------------
 @app.post("/player/{player_id}/metric")
 def add_metric(player_id: int, request: Request, value: int = Form(...), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
@@ -349,8 +394,12 @@ def add_metric(player_id: int, request: Request, value: int = Form(...), db: Ses
     request.session["flash"] = "Metric added."
     return RedirectResponse(f"/player/{player_id}", status_code=HTTP_302_FOUND)
 
-# ---- Utils --------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Utils
+# ------------------------------------------------------------------------------
 def save_file(upload: UploadFile, subdir: str) -> Optional[str]:
+    if not upload:
+        return None
     safe = upload.filename.replace("/", "_").replace("\\", "_")
     folder = UPLOADS_DIR / subdir
     folder.mkdir(parents=True, exist_ok=True)
@@ -359,7 +408,3 @@ def save_file(upload: UploadFile, subdir: str) -> Optional[str]:
     with path.open("wb") as f:
         f.write(upload.file.read())
     return f"/uploads/{subdir}/{path.name}"
-
-@app.get("/healthz", response_class=PlainTextResponse)
-def healthz():
-    return PlainTextResponse("ok")
