@@ -10,11 +10,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateNotFound
 
-from sqlalchemy import create_engine, String, Integer, DateTime, Float, ForeignKey, select, func
+from sqlalchemy import create_engine, String, Integer, DateTime, Float, ForeignKey, select, func, text
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Mapped, mapped_column, Session
+from sqlalchemy.exc import OperationalError
 
 # ------------------------------------------------------------------------------------
-# App + assets
+# App + static/template setup
 # ------------------------------------------------------------------------------------
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY", "dev-secret"), same_site="lax")
@@ -24,7 +25,7 @@ TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "templates")
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# Make sure style.css and logo.svg are reachable from /static even if kept at repo root
+# Ensure common static assets are available under /static
 for fname in ("style.css", "logo.svg"):
     src = os.path.join(".", fname)
     dst = os.path.join(STATIC_DIR, fname)
@@ -36,15 +37,15 @@ for fname in ("style.css", "logo.svg"):
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Jinja environment that searches multiple places
+# Jinja across multiple search roots
 loader = FileSystemLoader([TEMPLATES_DIR, "app/templates", "."])
 env = Environment(loader=loader, autoescape=select_autoescape(["html", "xml"]))
 templates = Jinja2Templates(env=env)
 templates.env.globals["now"] = lambda: datetime.now(timezone.utc)
 
-# Expected template names (we'll try these in order)
+# Template candidates
 TEMPLATE_INSTRUCTOR_CANDIDATES = [
-    "instructor_player_detail.html",   # <-- your file name
+    "instructor_player_detail.html",  # your file name
     "instructor_players.html",
     "instructor.html",
 ]
@@ -62,12 +63,11 @@ def render_first_existing(name_list, context):
         except TemplateNotFound as exc:
             last_exc = exc
             continue
-    # If none found, raise a helpful error
     missing = ", ".join(name_list)
     raise HTTPException(status_code=500, detail=f"No template found. Looked for: {missing}. Last error: {last_exc}")
 
 # ------------------------------------------------------------------------------------
-# Database
+# DB + models
 # ------------------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -128,7 +128,40 @@ class DrillAssignment(Base):
     player = relationship("Player")
     drill = relationship("Drill")
 
+# Create any missing tables
 Base.metadata.create_all(bind=engine)
+
+# --- Lightweight auto-migration for SQLite (adds missing columns) -------------------
+def _sqlite_add_missing_columns():
+    if engine.url.get_backend_name() != "sqlite":
+        return
+    with engine.begin() as conn:
+        def existing_cols(tbl: str) -> set[str]:
+            rows = conn.exec_driver_sql(f"PRAGMA table_info({tbl})").all()
+            return {r[1] for r in rows}  # name is 2nd column
+
+        # players
+        cols = existing_cols("players")
+        want = {
+            "age_group": "age_group VARCHAR(16)",
+            "photo_url": "photo_url VARCHAR(400)",
+            "login_code": "login_code VARCHAR(32)"
+        }
+        for col, ddl in want.items():
+            if col not in cols:
+                conn.exec_driver_sql(f"ALTER TABLE players ADD COLUMN {ddl}")
+
+        # instructors
+        cols = existing_cols("instructors")
+        if "login_code" not in cols:
+            conn.exec_driver_sql("ALTER TABLE instructors ADD COLUMN login_code VARCHAR(32)")
+
+# run migration once on import
+try:
+    _sqlite_add_missing_columns()
+except Exception as e:
+    # Don’t kill startup if migration hiccups; errors will still surface in logs.
+    print("SQLite migration warning:", e)
 
 def get_db() -> Session:
     db = SessionLocal()
@@ -162,6 +195,10 @@ def starred_ids_for_instructor(db: Session, instructor_id: Optional[int]) -> set
 # ------------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------------
+@app.head("/")
+def head_root():
+    return PlainTextResponse("OK")
+
 @app.get("/", response_class=HTMLResponse)
 def root():
     return RedirectResponse("/instructor", status_code=302)
@@ -174,9 +211,24 @@ def healthz():
 def instructor_view(request: Request, db: Session = Depends(get_db)):
     instructor_id = ensure_instructor_in_session(request, db)
 
-    rows = db.execute(select(Player.id, Player.name, Player.age_group, Player.photo_url)).all()
-    players = [{"id": pid, "name": name, "age_group": age or "", "photo_url": purl, "starred": False}
-               for (pid, name, age, purl) in rows]
+    # In case the DB existed prior to migration, try-with-fallback
+    try:
+        rows = db.execute(select(Player.id, Player.name, Player.age_group, Player.photo_url)).all()
+        include_age = True
+    except OperationalError:
+        rows = db.execute(select(Player.id, Player.name, Player.photo_url)).all()
+        include_age = False
+
+    players = []
+    for row in rows:
+        if include_age:
+            pid, name, age, purl = row
+            age = age or ""
+        else:
+            # legacy DB had no age_group column
+            pid, name, purl = row
+            age = ""
+        players.append({"id": pid, "name": name, "age_group": age, "photo_url": purl, "starred": False})
 
     starred = starred_ids_for_instructor(db, instructor_id)
     for p in players:
@@ -189,12 +241,11 @@ def instructor_view(request: Request, db: Session = Depends(get_db)):
 
     my_clients = [p for p in players if p["starred"]]
 
-    # Provide multiple keys so older/newer templates won’t 500 on missing names
     ctx = {
         "request": request,
         "players": players,
         "clients": players,          # alias
-        "roster": players,           # alias for old templates
+        "roster": players,           # alias for older templates
         "grouped": grouped,
         "my_clients": my_clients,
         "favorites": my_clients,     # alias
@@ -209,11 +260,7 @@ def toggle_star(player_id: int, request: Request, payload: dict = Body(None), db
     instructor_id = (payload or {}).get("instructor_id") or request.session.get("instructor_id")
     if not instructor_id:
         raise HTTPException(status_code=400, detail="instructor_id required")
-    instr = db.get(Instructor, instructor_id)
-    if not instr:
-        raise HTTPException(status_code=404, detail="Instructor not found")
-    player = db.get(Player, player_id)
-    if not player:
+    if not db.get(Player, player_id):
         raise HTTPException(status_code=404, detail="Player not found")
 
     existing = db.get(Favorite, {"instructor_id": instructor_id, "player_id": player_id})
@@ -230,7 +277,7 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # Exit velocity series
+    # Exit velocity series (smaller chart, red line handled in template/JS)
     data_rows = db.execute(
         select(ExitMetric.value, ExitMetric.created_at)
         .where(ExitMetric.player_id == player_id)
@@ -240,7 +287,6 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     labels = [r[1].strftime("%m/%d") if isinstance(r[1], datetime) else str(r[1]) for r in data_rows]
     values = [float(r[0]) for r in data_rows]
 
-    # Notes
     notes = db.execute(
         select(CoachNote.coach_name, CoachNote.text, CoachNote.created_at)
         .where(CoachNote.player_id == player_id)
@@ -248,7 +294,6 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     ).all()
     coach_notes = [{"coach_name": n[0], "text": n[1], "created_at": n[2].strftime("%Y-%m-%d %H:%M")} for n in notes]
 
-    # Assigned drills
     drills_rows = db.execute(
         select(Drill.title, Drill.video_url, DrillAssignment.note)
         .join(DrillAssignment, Drill.id == DrillAssignment.drill_id)
@@ -280,7 +325,6 @@ def dev_seed(db: Session = Depends(get_db)):
             Player(name="Mia Lee", age_group="16-18"),
         ])
     db.commit()
-    # Add some exit metrics to first player
     p = db.scalar(select(Player).order_by(Player.id.asc()))
     if p and not db.scalar(select(func.count()).select_from(ExitMetric).where(ExitMetric.player_id == p.id)):
         now = datetime.now(timezone.utc)
@@ -289,7 +333,7 @@ def dev_seed(db: Session = Depends(get_db)):
         db.commit()
     return {"ok": True}
 
-# Global 500 handler so Render logs show a traceback line
+# Friendly global 500 for Render logs
 @app.exception_handler(Exception)
 async def all_exception_handler(request: Request, exc: Exception):
     import traceback
