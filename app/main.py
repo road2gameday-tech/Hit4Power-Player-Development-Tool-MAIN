@@ -8,12 +8,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 
-from pydantic import BaseSettings
-
 # --- App & Templates ---------------------------------------------------------
 app = FastAPI()
 
-# Sessions (needed because templates read {{ session.get(...) }})
+# Sessions (templates use {{ session.get(...) }})
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
@@ -23,17 +21,14 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
 # Site links configurable via env (used by header buttons)
-class Settings(BaseSettings):
-    INSTAGRAM_URL: str = os.getenv("INSTAGRAM_URL", "https://instagram.com/hit4power")
-    WEBSITE_URL: str = os.getenv("WEBSITE_URL", "https://hit4power.com")
-
-settings = Settings()
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/hit4power")
+WEBSITE_URL = os.getenv("WEBSITE_URL", "https://hit4power.com")
 
 # Make helpers/globals available in Jinja
 templates.env.globals.update(
-    now=datetime.utcnow,               # enables {{ now().year }}
-    instagram_url=settings.INSTAGRAM_URL,
-    website_url=settings.WEBSITE_URL,
+    now=datetime.utcnow,        # enables {{ now().year }}
+    instagram_url=INSTAGRAM_URL,
+    website_url=WEBSITE_URL,
 )
 
 # Small render helper: always inject request & session
@@ -46,7 +41,6 @@ def render(name: str, request: Request, **ctx: Dict[str, Any]) -> HTMLResponse:
     return templates.TemplateResponse(name, base_ctx)
 
 # --- Data access (lightweight, resilient) ------------------------------------
-# This avoids ORM/model coupling and keeps the page up even if DB changes.
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -68,11 +62,13 @@ def get_db():
 
 def fetch_players(db) -> List[Dict[str, Any]]:
     """
-    Read only the columns we actually need so schema drift (like a missing
-    instructor_id column) won't 500 the page.
+    Read only the columns we actually need so schema drift
+    (like a missing instructor_id column) won't 500 the page.
     """
     try:
-        rows = db.execute(text("SELECT id, name, photo_url, phone FROM players")).mappings().all()
+        rows = db.execute(
+            text("SELECT id, name, photo_url, phone FROM players")
+        ).mappings().all()
         return [
             {
                 "id": r.get("id"),
@@ -87,7 +83,7 @@ def fetch_players(db) -> List[Dict[str, Any]]:
         return []
 
 # --- Routes -------------------------------------------------------------------
-# Keep current behavior: root -> /instructor (you can change this later).
+# Keep current behavior: root -> /instructor (change if you want a true homepage)
 @app.get("/", response_class=HTMLResponse)
 def root():
     return RedirectResponse("/instructor", status_code=302)
@@ -104,5 +100,4 @@ def instructor_view(request: Request, db=Depends(get_db)):
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear()
-    # Go back to root (which currently goes to /instructor)
     return RedirectResponse("/", status_code=303)
