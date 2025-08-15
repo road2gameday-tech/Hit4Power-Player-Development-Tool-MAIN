@@ -1,230 +1,134 @@
-{% set is_logged_in = request.session.get('player_id') %}
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="{{ request.cookies.get('theme', 'dark') }}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Player Dashboard • Hit4Power</title>
+  <link rel="icon" href="{{ url_for('static', path='logo.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    /* Tighten spacing specific to dashboard without touching global layout */
-    .dash-shell{max-width:1100px;margin:0 auto;padding:16px 16px 72px}
-    .dash-header{display:flex;align-items:center;gap:12px;justify-content:space-between}
-    .brand{display:flex;align-items:center;gap:10px}
-    .brand img{height:28px;width:auto;display:block}
-    .brand h1{font-size:18px;line-height:1.2;margin:0;font-weight:700}
-    .right-tools{display:flex;align-items:center;gap:8px}
-    .theme-toggle{display:inline-flex;align-items:center;gap:8px;font-size:12px}
-    .theme-switch{inline-size:44px;block-size:24px;border-radius:999px;background:var(--surface-3);position:relative}
-    .theme-knob{position:absolute;inset-block:3px;inset-inline-start:4px;inline-size:18px;block-size:18px;border-radius:999px;background:var(--text);transition:transform .18s ease}
-    html[data-theme="light"] .theme-knob{transform:translateX(20px)}
-
-    .player-card{display:grid;grid-template-columns:80px 1fr;gap:14px;align-items:center;background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:14px}
-    .avatar{inline-size:80px;block-size:80px;border-radius:999px;background:var(--surface-1);display:grid;place-items:center;border:1px solid var(--line);overflow:hidden}
-    .avatar img{inline-size:100%;block-size:100%;object-fit:cover}
-    .player-meta h2{margin:0 0 6px;font-size:18px}
-    .muted{opacity:.7;font-size:12px}
-    .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface-1)}
-
-    .grid{display:grid;gap:14px;margin-top:14px}
-    @media(min-width:900px){.grid{grid-template-columns:1.1fr .9fr}}
-
-    .card{background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:14px}
-    .card h3{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;font-size:14px;letter-spacing:.02em;text-transform:uppercase}
-    .mini{font-size:12px;opacity:.8}
-
-    /* Chart */
-    .chart-wrap{position:relative;inline-size:100%;min-height:220px;max-height:260px}
-    #evChart{position:absolute;inset:0}
-    .legend{display:flex;gap:10px;align-items:center;margin-top:8px;font-size:12px;opacity:.85}
-
-    /* Notes & Drills */
-    .note{border:1px dashed var(--line);border-radius:10px;padding:10px;background:var(--surface-1)}
-    .empty{opacity:.6;font-size:13px}
-    .drill{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--surface-1)}
-    .drill video,.drill iframe{max-inline-size:160px;inline-size:160px;block-size:90px;border-radius:8px;border:1px solid var(--line);background:#000}
-    .drill-title{font-size:14px;margin:0}
-    .list{display:grid;gap:10px}
-
-    /* Footer actions */
-    .footer{position:fixed;inset-inline:0;inset-block-end:0;padding:10px;background:linear-gradient(180deg, transparent, rgba(0,0,0,.08) 20%),var(--surface-0);backdrop-filter:saturate(150%) blur(6px);display:flex;justify-content:center;border-top:1px solid var(--line)}
-    .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;border:1px solid var(--brand);color:var(--on-brand);background:var(--brand);font-weight:700}
-    .btn.link{background:transparent;color:var(--brand);border-color:var(--brand)}
+    .chart-wrap { height: 220px; }
+    .chart-wrap canvas { width: 100% !important; height: 100% !important; }
   </style>
 </head>
-<body>
-  <div class="dash-shell">
-    <header class="dash-header">
-      <div class="brand">
-        <img src="{{ url_for('static', path='logo.svg') }}" alt="Hit4Power">
-        <h1>Player Dashboard</h1>
-      </div>
-      <div class="right-tools">
-        {% if request.session.get('player_id') or request.session.get('instructor_id') %}
-          <a class="chip" href="/logout">Logout</a>
-        {% endif %}
-        <label class="theme-toggle">
-          <span class="muted">Theme</span>
-          <span class="theme-switch"><span class="theme-knob"></span></span>
-        </label>
-      </div>
-    </header>
+<body class="page">
+  <header class="header">
+    <a href="/" aria-label="Home">
+      <img class="logo" src="{{ url_for('static', path='logo.svg') }}" alt="Hit4Power">
+    </a>
+    <nav class="nav">
+      <a class="btn btn-outline-red" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
+      <a class="btn btn-outline-red" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
+      <button id="themeToggle" class="btn btn-ghost" type="button">Toggle Theme</button>
+      {% if session.get('role') %}
+        <a class="btn btn-red" href="/logout">Logout</a>
+      {% endif %}
+    </nav>
+  </header>
 
-    {% if not is_logged_in %}
-      <!-- Embedded Player Login -->
-      <div class="card" style="max-width:480px;margin:24px auto 0;">
-        <h3>Player Login</h3>
-        <form method="post" action="/player/login" class="grid" style="grid-template-columns:1fr auto;">
-          <input type="text" name="code" placeholder="Enter your login code" required style="padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-1);color:var(--text)">
-          <button class="btn">Login</button>
-        </form>
-      </div>
-    {% else %}
-      <!-- Player header -->
-      <section class="player-card">
+  <main class="container">
+    {% if flash %}
+      <div class="flash">{{ flash }}</div>
+    {% endif %}
+
+    <div class="card player-header">
+      <div class="player-id">
         <div class="avatar">
-          {% set photo_path = player.photo_path if player and player.photo_path else url_for('static', path='logo.svg') %}
-          <img src="{{ photo_path }}" alt="Player photo">
+          {% if player and player.photo_url %}
+            <img src="{{ player.photo_url }}" alt="{{ player.name }}">
+          {% else %}
+            <div class="avatar-placeholder">{{ (player.name[:1] if player and player.name else 'P')|upper }}</div>
+          {% endif %}
         </div>
         <div class="player-meta">
-          <h2>{{ player.name }}</h2>
-          <div class="muted">Welcome back! Track your progress and coach feedback here.</div>
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <span class="chip">Exit Velocity focus</span>
-            {% if last_session_at %}
-              <span class="chip">Last session: {{ last_session_at }}</span>
-            {% endif %}
-          </div>
+          <h2 class="player-name">{{ player.name if player else 'Player' }}</h2>
+          <div class="muted small">Login code: {{ player.login_code if player and player.login_code else '—' }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <section class="card">
+        <h3 class="section-title">Exit Velocity</h3>
+        <div class="chart-wrap">
+          <canvas id="velocityChart"></canvas>
         </div>
       </section>
 
-      <section class="grid">
-        <!-- Chart -->
-        <div class="card">
-          <h3>Exit Velocity <span class="mini">updated live</span></h3>
-          <div class="chart-wrap"><canvas id="evChart"></canvas></div>
-          <div class="legend"><span class="chip" style="border-color:var(--brand);color:var(--brand)">● EV (mph)</span></div>
-        </div>
+      <section class="card">
+        <h3 class="section-title">Coach Notes</h3>
+        {% if coach_notes and coach_notes|length > 0 %}
+          <ul class="list">
+            {% for note in coach_notes %}
+              <li class="card" style="margin:0;">
+                <div class="note-text">{{ note.text }}</div>
+                <div class="note-meta">by {{ note.coach_name }} • {{ note.created_at }}</div>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="muted">No notes yet. Your coach’s notes will appear here after sessions.</div>
+        {% endif %}
+      </section>
+    </div>
 
-        <!-- Coach Notes -->
-        <div class="card">
-          <h3>Coach Notes</h3>
-          {% if coach_notes and coach_notes|length > 0 %}
-            <div class="list">
-              {% for n in coach_notes %}
-                <div class="note">
-                  <div class="muted" style="margin-bottom:6px">{{ n.created_at }}</div>
-                  <div>{{ n.text }}</div>
+    {% if drills and drills|length > 0 %}
+      <section class="card">
+        <h3 class="section-title">Assigned Drills</h3>
+        <ul class="list">
+          {% for d in drills %}
+            <li class="card" style="margin:0;">
+              <strong>{{ d.title }}</strong>
+              {% if d.video_url %}
+                <div class="mt-1 small">
+                  <a class="a-red" href="{{ d.video_url }}" target="_blank" rel="noopener">Watch video</a>
                 </div>
-              {% endfor %}
-            </div>
-          {% else %}
-            <div class="note empty">Coach notes will appear here after your session.</div>
-          {% endif %}
-        </div>
-
-        <!-- Shared Drills -->
-        <div class="card">
-          <h3>Shared Drills</h3>
-          {% if shared_drills and shared_drills|length > 0 %}
-            <div class="list">
-              {% for d in shared_drills %}
-                <div class="drill">
-                  {% if d.embed_html %}
-                    <div style="inline-size:160px;block-size:90px;overflow:hidden;border-radius:8px;border:1px solid var(--line)">{{ d.embed_html | safe }}</div>
-                  {% elif d.video_url %}
-                    <video src="{{ d.video_url }}" controls></video>
-                  {% else %}
-                    <div class="empty" style="inline-size:160px;block-size:90px;display:grid;place-items:center;border-radius:8px;border:1px dashed var(--line)">No preview</div>
-                  {% endif %}
-                  <div>
-                    <p class="drill-title">{{ d.title or 'Drill' }}</p>
-                    {% if d.notes %}<div class="muted">{{ d.notes }}</div>{% endif %}
-                  </div>
-                </div>
-              {% endfor %}
-            </div>
-          {% else %}
-            <div class="note empty">Your coach will share drills here when assigned.</div>
-          {% endif %}
-        </div>
-
-        <!-- Quick Stats -->
-        <div class="card">
-          <h3>Quick Stats</h3>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-            <div class="note"><div class="muted">Best EV</div><div style="font-weight:800;font-size:18px">{{ best_ev or '—' }}</div></div>
-            <div class="note"><div class="muted">Avg EV</div><div style="font-weight:800;font-size:18px">{{ avg_ev or '—' }}</div></div>
-            <div class="note"><div class="muted">Sessions</div><div style="font-weight:800;font-size:18px">{{ sessions_count or 0 }}</div></div>
-          </div>
-        </div>
+              {% endif %}
+              {% if d.note %}
+                <div class="mt-1 muted small">{{ d.note }}</div>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
       </section>
     {% endif %}
-  </div>
+  </main>
 
-  <div class="footer">
-    <a class="btn link" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
-    <a class="btn link" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
-  </div>
+  <footer class="footer">
+    <small class="muted">© {{ now().year }} Hit4Power</small>
+    <div>
+      <a class="btn btn-outline-red" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
+      <a class="btn btn-outline-red" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
+    </div>
+  </footer>
 
-  <!-- Chart.js (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script>
-    // Theme
-    const html = document.documentElement;
-    const saved = localStorage.getItem('h4p_theme') || 'dark';
-    html.setAttribute('data-theme', saved);
-    document.querySelector('.theme-toggle').addEventListener('click', () => {
-      const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-      html.setAttribute('data-theme', next);
-      localStorage.setItem('h4p_theme', next);
-    });
+    // Theme toggle
+    (function () {
+      const root = document.documentElement, key = 'h4p_theme';
+      function setTheme(t){ root.setAttribute('data-theme', t); try{localStorage.setItem(key,t);}catch(e){}; document.cookie="theme="+t+"; path=/; max-age=31536000"; }
+      const saved = (localStorage.getItem(key) || null); if (saved) setTheme(saved);
+      document.getElementById('themeToggle')?.addEventListener('click', () => setTheme(root.getAttribute('data-theme')==='light'?'dark':'light'));
+    })();
 
-    // Build EV series from whichever variable you provide
-    // Preferred: exit_velocity_series = [{date: "2025-08-01", value: 87}, ...]
-    // Fallback: ev_labels, ev_values arrays
-    const series = {{ exit_velocity_series | default([], true) | tojson }};
-    let labels = series.length ? series.map(p => p.date) : {{ ev_labels | default([], true) | tojson }};
-    let values = series.length ? series.map(p => Number(p.value)) : {{ ev_values | default([], true) | tojson }};
+    // Exit Velocity chart (small, red line)
+    (function () {
+      const el = document.getElementById('velocityChart');
+      if (!el) return;
+      const labels = {{ (chart_labels if chart_labels is defined else []) | tojson }};
+      const values = {{ (chart_values if chart_values is defined else []) | tojson }};
 
-    // If still empty, nothing to draw.
-    if (labels.length && values.length) {
-      const ctx = document.getElementById('evChart').getContext('2d');
-      new Chart(ctx, {
+      new Chart(el, {
         type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: 'Exit Velocity',
-            data: values,
-            borderColor: '#ef4444',      // red line to match theme
-            backgroundColor: 'rgba(239,68,68,.12)',
-            pointRadius: 2,
-            pointHoverRadius: 3,
-            tension: .25,
-            borderWidth: 2,
-            fill: false
-          }]
-        },
+        data: { labels, datasets: [{ data: values, borderColor: '#e11d48', backgroundColor: 'rgba(225,29,72,0.15)', borderWidth: 2, pointRadius: 2, tension: 0.3, label: 'Exit Velo' }] },
         options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,              // snappier, avoids jank
-          elements: { line: { capBezierPoints: true }},
-          scales: {
-            y: {
-              grid: { color: 'rgba(128,128,128,.2)' },
-              ticks: { callback: v => v + ' mph' }
-            },
-            x: { grid: { display: false } }
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: { mode: 'index', intersect: false }
-          }
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+          scales: { x: { grid: { color: 'rgba(128,128,128,0.15)' } }, y: { beginAtZero: true, grid: { color: 'rgba(128,128,128,0.15)' } } }
         }
       });
-    }
+    })();
   </script>
 </body>
 </html>
