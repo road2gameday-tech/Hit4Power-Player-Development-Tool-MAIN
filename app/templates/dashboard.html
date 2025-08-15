@@ -1,134 +1,106 @@
 <!doctype html>
-<html lang="en" data-theme="{{ request.cookies.get('theme', 'dark') }}">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Player Dashboard • Hit4Power</title>
-  <link rel="icon" href="{{ url_for('static', path='logo.svg') }}">
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ page_title or "Instructor Dashboard" }}</title>
   <style>
-    .chart-wrap { height: 220px; }
-    .chart-wrap canvas { width: 100% !important; height: 100% !important; }
+    :root { --bg:#0b0b0c; --card:#151518; --text:#e8e8ea; --muted:#a2a2aa; --accent:#4ade80; --border:#242428; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; background:var(--bg); color:var(--text); }
+    a { color:inherit; text-decoration:none; }
+    header { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--border); position:sticky; top:0; background:rgba(11,11,12,.8); backdrop-filter:saturate(120%) blur(8px); }
+    header img { height:28px; width:auto; display:block; }
+    header nav { margin-left:auto; display:flex; gap:16px; align-items:center; }
+    header nav a { color:var(--muted); }
+    main { max-width:1100px; margin:24px auto; padding:0 16px 48px; }
+    h1 { margin:8px 0 18px; font-size:28px; }
+    .muted { color:var(--muted); }
+    .toolbar { display:flex; gap:12px; align-items:center; margin:10px 0 22px; }
+    .search { flex:1; }
+    .search input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:#0e0e11; color:var(--text); }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap:14px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; overflow:hidden; display:flex; flex-direction:column; }
+    .photo { aspect-ratio: 16/10; background:#0e0e12 center/cover no-repeat; }
+    .body { padding:12px; display:flex; flex-direction:column; gap:10px; }
+    .name { font-weight:600; }
+    .row { display:flex; gap:8px; align-items:center; justify-content:space-between; }
+    .btns { display:flex; gap:8px; }
+    .btn { padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:#101015; font-size:14px; }
+    .btn.primary { background:linear-gradient(180deg, #1f9d55, #137a41); border-color:#0c5e31; }
+    .empty { padding:18px; border:1px dashed var(--border); border-radius:12px; text-align:center; }
+    footer { margin-top:28px; color:var(--muted); font-size:13px; display:flex; gap:12px; }
+    @media (hover:hover) {
+      .card:hover { border-color:#2f2f36; transform:translateY(-1px); transition:.15s ease; }
+    }
   </style>
 </head>
-<body class="page">
-  <header class="header">
-    <a href="/" aria-label="Home">
-      <img class="logo" src="{{ url_for('static', path='logo.svg') }}" alt="Hit4Power">
-    </a>
-    <nav class="nav">
-      <a class="btn btn-outline-red" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
-      <a class="btn btn-outline-red" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
-      <button id="themeToggle" class="btn btn-ghost" type="button">Toggle Theme</button>
-      {% if session.get('role') %}
-        <a class="btn btn-red" href="/logout">Logout</a>
-      {% endif %}
+<body>
+  <header>
+    <a href="/instructor"><img src="/static/img/logo.svg" alt="Hit4Power" onerror="this.style.display='none'"/></a>
+    <strong>Instructor</strong>
+    <nav>
+      <a href="https://instagram.com/hit4power" target="_blank" rel="noopener">Instagram</a>
+      <a href="https://hit4power.com" target="_blank" rel="noopener">Website</a>
+      <a href="/logout">Logout</a>
     </nav>
   </header>
 
-  <main class="container">
-    {% if flash %}
-      <div class="flash">{{ flash }}</div>
-    {% endif %}
+  <main>
+    <h1>Instructor Dashboard</h1>
+    <div class="toolbar">
+      <div class="search"><input id="q" placeholder="Search players by name…" autocomplete="off"></div>
+      <!-- Add buttons as needed -->
+    </div>
 
-    <div class="card player-header">
-      <div class="player-id">
-        <div class="avatar">
-          {% if player and player.photo_url %}
-            <img src="{{ player.photo_url }}" alt="{{ player.name }}">
-          {% else %}
-            <div class="avatar-placeholder">{{ (player.name[:1] if player and player.name else 'P')|upper }}</div>
-          {% endif %}
-        </div>
-        <div class="player-meta">
-          <h2 class="player-name">{{ player.name if player else 'Player' }}</h2>
-          <div class="muted small">Login code: {{ player.login_code if player and player.login_code else '—' }}</div>
-        </div>
+    {% if players and players|length %}
+      <div id="cards" class="grid">
+        {% for p in players %}
+          <div class="card" data-name="{{ (p.name or '') | lower }}">
+            <div class="photo" style="background-image:url('{{ p.photo_url or "/static/img/avatar-placeholder.png" }}')"></div>
+            <div class="body">
+              <div class="row">
+                <div class="name">{{ p.name or ("Player " ~ p.id) }}</div>
+              </div>
+              <div class="btns">
+                <a class="btn primary" href="/instructor/player/{{ p.id }}">View</a>
+                {% if p.phone %}
+                  <a class="btn" href="sms:{{ p.phone }}">Text</a>
+                  <a class="btn" href="tel:{{ p.phone }}">Call</a>
+                {% else %}
+                  <span class="btn" style="opacity:.5; pointer-events:none">No Phone</span>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        {% endfor %}
       </div>
-    </div>
-
-    <div class="grid two">
-      <section class="card">
-        <h3 class="section-title">Exit Velocity</h3>
-        <div class="chart-wrap">
-          <canvas id="velocityChart"></canvas>
-        </div>
-      </section>
-
-      <section class="card">
-        <h3 class="section-title">Coach Notes</h3>
-        {% if coach_notes and coach_notes|length > 0 %}
-          <ul class="list">
-            {% for note in coach_notes %}
-              <li class="card" style="margin:0;">
-                <div class="note-text">{{ note.text }}</div>
-                <div class="note-meta">by {{ note.coach_name }} • {{ note.created_at }}</div>
-              </li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <div class="muted">No notes yet. Your coach’s notes will appear here after sessions.</div>
-        {% endif %}
-      </section>
-    </div>
-
-    {% if drills and drills|length > 0 %}
-      <section class="card">
-        <h3 class="section-title">Assigned Drills</h3>
-        <ul class="list">
-          {% for d in drills %}
-            <li class="card" style="margin:0;">
-              <strong>{{ d.title }}</strong>
-              {% if d.video_url %}
-                <div class="mt-1 small">
-                  <a class="a-red" href="{{ d.video_url }}" target="_blank" rel="noopener">Watch video</a>
-                </div>
-              {% endif %}
-              {% if d.note %}
-                <div class="mt-1 muted small">{{ d.note }}</div>
-              {% endif %}
-            </li>
-          {% endfor %}
-        </ul>
-      </section>
+    {% else %}
+      <div class="empty">
+        No players found yet.
+      </div>
     {% endif %}
+
+    <footer>
+      <small>© {{ current_year }} Hit4Power</small>
+      <small class="muted">Instagram</small>
+      <small><a class="muted" href="https://hit4power.com" target="_blank" rel="noopener">Website</a></small>
+    </footer>
   </main>
 
-  <footer class="footer">
-    <small class="muted">© {{ now().year }} Hit4Power</small>
-    <div>
-      <a class="btn btn-outline-red" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
-      <a class="btn btn-outline-red" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
-    </div>
-  </footer>
-
   <script>
-    // Theme toggle
-    (function () {
-      const root = document.documentElement, key = 'h4p_theme';
-      function setTheme(t){ root.setAttribute('data-theme', t); try{localStorage.setItem(key,t);}catch(e){}; document.cookie="theme="+t+"; path=/; max-age=31536000"; }
-      const saved = (localStorage.getItem(key) || null); if (saved) setTheme(saved);
-      document.getElementById('themeToggle')?.addEventListener('click', () => setTheme(root.getAttribute('data-theme')==='light'?'dark':'light'));
-    })();
-
-    // Exit Velocity chart (small, red line)
-    (function () {
-      const el = document.getElementById('velocityChart');
-      if (!el) return;
-      const labels = {{ (chart_labels if chart_labels is defined else []) | tojson }};
-      const values = {{ (chart_values if chart_values is defined else []) | tojson }};
-
-      new Chart(el, {
-        type: 'line',
-        data: { labels, datasets: [{ data: values, borderColor: '#e11d48', backgroundColor: 'rgba(225,29,72,0.15)', borderWidth: 2, pointRadius: 2, tension: 0.3, label: 'Exit Velo' }] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
-          scales: { x: { grid: { color: 'rgba(128,128,128,0.15)' } }, y: { beginAtZero: true, grid: { color: 'rgba(128,128,128,0.15)' } } }
-        }
+    // client-side filter
+    const q = document.getElementById('q');
+    const cards = document.getElementById('cards');
+    if (q && cards) {
+      q.addEventListener('input', () => {
+        const term = q.value.trim().toLowerCase();
+        [...cards.children].forEach(card => {
+          const ok = !term || (card.dataset.name || '').includes(term);
+          card.style.display = ok ? '' : 'none';
+        });
       });
-    })();
+    }
   </script>
 </body>
 </html>
