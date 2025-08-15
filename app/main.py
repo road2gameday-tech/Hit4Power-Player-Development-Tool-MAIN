@@ -1,61 +1,168 @@
-import os, shutil
-from datetime import datetime, timezone
-from typing import Optional
+# app/main.py
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, List
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Body
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+from fastapi import FastAPI, Request, Depends, Form, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.status import HTTP_302_FOUND
+from jinja2 import TemplateNotFound
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateNotFound
+from sqlalchemy import (
+    create_engine, Column, Integer, String, DateTime, ForeignKey, Text, select, func, UniqueConstraint
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
-from sqlalchemy import create_engine, String, Integer, DateTime, Float, ForeignKey, select, func, text
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Mapped, mapped_column, Session
-from sqlalchemy.exc import OperationalError
+# ------------------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+UPLOADS_DIR = BASE_DIR / "uploads"
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ------------------------------------------------------------------------------------
-# App + static/template setup
-# ------------------------------------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+SECRET_KEY = os.getenv("SESSION_SECRET", "dev-secret-change-me")
+
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_FROM_NUMBER")
+
+# ------------------------------------------------------------------------------
+# App + Middleware
+# ------------------------------------------------------------------------------
 app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY", "dev-secret"), same_site="lax")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
-STATIC_DIR = os.getenv("STATIC_DIR", "static")
-TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "templates")
-os.makedirs(STATIC_DIR, exist_ok=True)
-os.makedirs(TEMPLATES_DIR, exist_ok=True)
-
-# Ensure common static assets are available under /static
-for fname in ("style.css", "logo.svg"):
-    src = os.path.join(".", fname)
-    dst = os.path.join(STATIC_DIR, fname)
-    if os.path.exists(src) and not os.path.exists(dst):
-        try:
-            shutil.copyfile(src, dst)
-        except Exception:
-            pass
-
+# Static files (style.css, logo.svg, etc.)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Jinja across multiple search roots
-loader = FileSystemLoader([TEMPLATES_DIR, "app/templates", "."])
-env = Environment(loader=loader, autoescape=select_autoescape(["html", "xml"]))
-templates = Jinja2Templates(env=env)
-templates.env.globals["now"] = lambda: datetime.now(timezone.utc)
+# Templates
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# Template candidates
+# ------------------------------------------------------------------------------
+# DB setup
+# ------------------------------------------------------------------------------
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
+
+# ------------------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------------------
+class Instructor(Base):
+    __tablename__ = "instructors"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    login_code = Column(String(64), unique=True, nullable=False)
+
+    players = relationship("Player", back_populates="instructor")
+
+
+class Player(Base):
+    __tablename__ = "players"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    login_code = Column(String(64), unique=True, nullable=False)
+    phone = Column(String(32), nullable=True)
+    photo_url = Column(String(500), nullable=True)
+    # age_group is OPTIONAL in DB; don't select it unless it exists
+    # age_group = Column(String(32))
+
+    instructor_id = Column(Integer, ForeignKey("instructors.id"), nullable=True)
+    instructor = relationship("Instructor", back_populates="players")
+
+    notes = relationship("CoachNote", back_populates="player", cascade="all, delete-orphan")
+    drills = relationship("Drill", back_populates="player", cascade="all, delete-orphan")
+    metrics = relationship("PlayerMetric", back_populates="player", cascade="all, delete-orphan")
+
+
+class CoachNote(Base):
+    __tablename__ = "coach_notes"
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False)
+    instructor_id = Column(Integer, ForeignKey("instructors.id"), nullable=True)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    player = relationship("Player", back_populates="notes")
+
+
+class Drill(Base):
+    __tablename__ = "drills"
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False)
+    instructor_id = Column(Integer, ForeignKey("instructors.id"), nullable=True)
+    title = Column(String(200), nullable=False)
+    file_path = Column(String(500), nullable=True)  # local path under /uploads
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    player = relationship("Player", back_populates="drills")
+
+
+class Favorite(Base):
+    __tablename__ = "favorites"
+    id = Column(Integer, primary_key=True)
+    instructor_id = Column(Integer, ForeignKey("instructors.id"), nullable=False)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False)
+
+    __table_args__ = (UniqueConstraint("instructor_id", "player_id", name="uq_fav_instructor_player"),)
+
+
+class PlayerMetric(Base):
+    __tablename__ = "player_metrics"
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False)
+    metric_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    value = Column(Integer, nullable=False, default=0)
+
+    player = relationship("Player", back_populates="metrics")
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 TEMPLATE_INSTRUCTOR_CANDIDATES = [
-    "instructor_player_detail.html",  # your file name
-    "instructor_players.html",
-    "instructor.html",
+    "instructor.html",           # preferred list/clients page
+    "dashboard.html",            # your existing instructor list page
+    "instructor_players.html",   # older name for the list
 ]
-TEMPLATE_PLAYER_CANDIDATES = [
-    "dashboard.html",
+
+TEMPLATE_PLAYER_DETAIL_CANDIDATES = [
+    "instructor_player_detail.html",  # your detail template
     "player_dashboard.html",
     "player.html",
 ]
 
-def render_first_existing(name_list, context):
+def render_first_existing(name_list: List[str], context: dict):
+    """
+    Try templates in order; always provide session to Jinja.
+    """
+    # Inject session so templates can do: {% if session.get('role') %}
+    if "request" in context and "session" not in context:
+        try:
+            context["session"] = context["request"].session
+        except Exception:
+            context["session"] = {}
+
     last_exc = None
     for name in name_list:
         try:
@@ -66,210 +173,135 @@ def render_first_existing(name_list, context):
     missing = ", ".join(name_list)
     raise HTTPException(status_code=500, detail=f"No template found. Looked for: {missing}. Last error: {last_exc}")
 
-# ------------------------------------------------------------------------------------
-# DB + models
-# ------------------------------------------------------------------------------------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, echo=False, future=True, connect_args=connect_args)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
-Base = declarative_base()
-
-class Instructor(Base):
-    __tablename__ = "instructors"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), default="Coach")
-    login_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-
-class Player(Base):
-    __tablename__ = "players"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(120))
-    age_group: Mapped[Optional[str]] = mapped_column(String(16))
-    photo_url: Mapped[Optional[str]] = mapped_column(String(400))
-    login_code: Mapped[Optional[str]] = mapped_column(String(32))
-
-class Favorite(Base):
-    __tablename__ = "favorites"
-    instructor_id: Mapped[int] = mapped_column(ForeignKey("instructors.id"), primary_key=True)
-    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    instructor = relationship("Instructor")
-    player = relationship("Player")
-
-class ExitMetric(Base):
-    __tablename__ = "exit_metrics"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
-    value: Mapped[float] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    player = relationship("Player")
-
-class CoachNote(Base):
-    __tablename__ = "coach_notes"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
-    coach_name: Mapped[str] = mapped_column(String(120))
-    text: Mapped[str] = mapped_column(String(4000))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-class Drill(Base):
-    __tablename__ = "drills"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    title: Mapped[str] = mapped_column(String(200))
-    video_url: Mapped[Optional[str]] = mapped_column(String(600))
-
-class DrillAssignment(Base):
-    __tablename__ = "drill_assignments"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
-    drill_id: Mapped[int] = mapped_column(ForeignKey("drills.id"))
-    note: Mapped[Optional[str]] = mapped_column(String(1000))
-    player = relationship("Player")
-    drill = relationship("Drill")
-
-# Create any missing tables
-Base.metadata.create_all(bind=engine)
-
-# --- Lightweight auto-migration for SQLite (adds missing columns) -------------------
-def _sqlite_add_missing_columns():
-    if engine.url.get_backend_name() != "sqlite":
-        return
-    with engine.begin() as conn:
-        def existing_cols(tbl: str) -> set[str]:
-            rows = conn.exec_driver_sql(f"PRAGMA table_info({tbl})").all()
-            return {r[1] for r in rows}  # name is 2nd column
-
-        # players
-        cols = existing_cols("players")
-        want = {
-            "age_group": "age_group VARCHAR(16)",
-            "photo_url": "photo_url VARCHAR(400)",
-            "login_code": "login_code VARCHAR(32)"
-        }
-        for col, ddl in want.items():
-            if col not in cols:
-                conn.exec_driver_sql(f"ALTER TABLE players ADD COLUMN {ddl}")
-
-        # instructors
-        cols = existing_cols("instructors")
-        if "login_code" not in cols:
-            conn.exec_driver_sql("ALTER TABLE instructors ADD COLUMN login_code VARCHAR(32)")
-
-# run migration once on import
-try:
-    _sqlite_add_missing_columns()
-except Exception as e:
-    # Don’t kill startup if migration hiccups; errors will still surface in logs.
-    print("SQLite migration warning:", e)
-
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ------------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------------
-AGE_BUCKETS = ["7-9", "10-12", "13-15", "16-18", "18+"]
-
 def ensure_instructor_in_session(request: Request, db: Session) -> int:
+    """
+    Guarantees there's an instructor in session; sets a default role for templates.
+    """
+    request.session.setdefault("role", "instructor")
     iid = request.session.get("instructor_id")
     if iid:
         return iid
+    # fallback/default coach for first-time sessions
     inst = db.scalar(select(Instructor).where(Instructor.login_code == "DEFAULT"))
     if not inst:
         inst = Instructor(name="Coach", login_code="DEFAULT")
-        db.add(inst); db.commit(); db.refresh(inst)
+        db.add(inst)
+        db.commit()
+        db.refresh(inst)
     request.session["instructor_id"] = inst.id
     return inst.id
 
-def starred_ids_for_instructor(db: Session, instructor_id: Optional[int]) -> set[int]:
+def current_instructor(db: Session, instructor_id: Optional[int]) -> Optional[Instructor]:
     if not instructor_id:
-        return set()
-    rows = db.execute(select(Favorite.player_id).where(Favorite.instructor_id == instructor_id)).all()
-    return {r[0] for r in rows}
+        return None
+    return db.get(Instructor, instructor_id)
 
-# ------------------------------------------------------------------------------------
+def file_save(upload: UploadFile, subdir: str) -> Optional[str]:
+    """
+    Save an UploadFile to /uploads/<subdir>/timestamp_filename and return relative path (for href/src).
+    """
+    if not upload or upload.filename is None or upload.filename == "":
+        return None
+    safe_name = upload.filename.replace("/", "_").replace("\\", "_")
+    target_dir = UPLOADS_DIR / subdir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    path = target_dir / f"{stamp}_{safe_name}"
+    with path.open("wb") as f:
+        f.write(upload.file.read())
+    rel_path = f"/uploads/{subdir}/{path.name}"
+    return rel_path
+
+# Expose the uploads directory (read-only)
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR), html=False), name="uploads")
+
+# ------------------------------------------------------------------------------
 # Routes
-# ------------------------------------------------------------------------------------
-@app.head("/")
-def head_root():
-    return PlainTextResponse("OK")
+# ------------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-def root():
-    return RedirectResponse("/instructor", status_code=302)
+def root(request: Request):
+    # Send users to the instructor list by default
+    return RedirectResponse(url="/instructor", status_code=HTTP_302_FOUND)
 
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
+# -------------------- Login (forms embedded in pages) -------------------------
+
+@app.post("/login/instructor")
+def login_instructor(request: Request, code: str = Form(...), db: Session = Depends(get_db)):
+    code = (code or "").strip()
+    inst = db.scalar(select(Instructor).where(Instructor.login_code == code))
+    if not inst:
+        # auto-provision simple instructor if new code is used
+        inst = Instructor(name=f"Coach {code}", login_code=code)
+        db.add(inst)
+        db.commit()
+        db.refresh(inst)
+    request.session["instructor_id"] = inst.id
+    request.session["role"] = "instructor"
+    request.session["flash"] = "Logged in as instructor."
+    return RedirectResponse("/instructor", status_code=HTTP_302_FOUND)
+
+@app.post("/login/player")
+def login_player(request: Request, code: str = Form(...), db: Session = Depends(get_db)):
+    code = (code or "").strip()
+    player = db.scalar(select(Player).where(Player.login_code == code))
+    if not player:
+        request.session["flash"] = "Invalid player code."
+        return RedirectResponse("/instructor", status_code=HTTP_302_FOUND)
+    request.session["player_id"] = player.id
+    request.session["role"] = "player"
+    request.session["flash"] = f"Welcome, {player.name}!"
+    return RedirectResponse(f"/player/{player.id}", status_code=HTTP_302_FOUND)
+
+# -------------------- Instructor: Clients List (was "Roster") -----------------
 
 @app.get("/instructor", response_class=HTMLResponse)
 def instructor_view(request: Request, db: Session = Depends(get_db)):
     instructor_id = ensure_instructor_in_session(request, db)
 
-    # In case the DB existed prior to migration, try-with-fallback
-    try:
-        rows = db.execute(select(Player.id, Player.name, Player.age_group, Player.photo_url)).all()
-        include_age = True
-    except OperationalError:
-        rows = db.execute(select(Player.id, Player.name, Player.photo_url)).all()
-        include_age = False
-
+    # Load all players (avoid selecting non-existent columns)
+    players_rows = db.execute(select(Player.id, Player.name, Player.photo_url, Player.phone, Player.instructor_id)).all()
     players = []
-    for row in rows:
-        if include_age:
-            pid, name, age, purl = row
-            age = age or ""
-        else:
-            # legacy DB had no age_group column
-            pid, name, purl = row
-            age = ""
-        players.append({"id": pid, "name": name, "age_group": age, "photo_url": purl, "starred": False})
+    for pid, name, photo_url, phone, instr_id in players_rows:
+        players.append({
+            "id": pid,
+            "name": name,
+            "photo_url": photo_url,
+            "phone": phone,
+            "instructor_id": instr_id,
+        })
 
-    starred = starred_ids_for_instructor(db, instructor_id)
+    # Which players are starred by this instructor?
+    fav_ids = set(pid for (pid,) in db.execute(
+        select(Favorite.player_id).where(Favorite.instructor_id == instructor_id)
+    ).all())
+
+    # Mark starred
     for p in players:
-        p["starred"] = p["id"] in starred
+        p["starred"] = p["id"] in fav_ids
 
-    grouped = {k: [] for k in AGE_BUCKETS}
-    for p in players:
-        key = p["age_group"] if p["age_group"] in grouped else AGE_BUCKETS[-1]
-        grouped[key].append(p)
-
+    # "My Clients" = starred only
     my_clients = [p for p in players if p["starred"]]
+
+    # group by first letter for UI (optional)
+    grouped = {}
+    for p in players:
+        k = (p["name"][:1] or "#").upper()
+        grouped.setdefault(k, []).append(p)
 
     ctx = {
         "request": request,
+        "session": request.session,
         "players": players,
-        "clients": players,          # alias
-        "roster": players,           # alias for older templates
-        "grouped": grouped,
+        "clients": players,      # synonym if your template uses "clients"
+        "roster": players,       # backward-compat if template still says "roster"
         "my_clients": my_clients,
-        "favorites": my_clients,     # alias
-        "age_buckets": AGE_BUCKETS,
-        "instructor_id": instructor_id,
-        "flash": request.session.get("flash"),
+        "grouped": grouped,
+        "flash": request.session.pop("flash", None),
     }
     return render_first_existing(TEMPLATE_INSTRUCTOR_CANDIDATES, ctx)
 
-@app.post("/api/players/{player_id}/toggle_star")
-def toggle_star(player_id: int, request: Request, payload: dict = Body(None), db: Session = Depends(get_db)):
-    instructor_id = (payload or {}).get("instructor_id") or request.session.get("instructor_id")
-    if not instructor_id:
-        raise HTTPException(status_code=400, detail="instructor_id required")
-    if not db.get(Player, player_id):
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    existing = db.get(Favorite, {"instructor_id": instructor_id, "player_id": player_id})
-    if existing:
-        db.delete(existing); db.commit()
-        return {"starred": False}
-    else:
-        db.add(Favorite(instructor_id=instructor_id, player_id=player_id)); db.commit()
-        return {"starred": True}
+# -------------------- Player Detail (Instructor or Player sees) ---------------
 
 @app.get("/player/{player_id}", response_class=HTMLResponse)
 def player_dashboard(player_id: int, request: Request, db: Session = Depends(get_db)):
@@ -277,66 +309,205 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # Exit velocity series (smaller chart, red line handled in template/JS)
-    data_rows = db.execute(
-        select(ExitMetric.value, ExitMetric.created_at)
-        .where(ExitMetric.player_id == player_id)
-        .order_by(ExitMetric.created_at.asc())
-        .limit(100)
+    # chart data (limit to latest 12 points)
+    metrics = db.execute(
+        select(PlayerMetric.metric_date, PlayerMetric.value)
+        .where(PlayerMetric.player_id == player_id)
+        .order_by(PlayerMetric.metric_date.asc())
+        .limit(12)
     ).all()
-    labels = [r[1].strftime("%m/%d") if isinstance(r[1], datetime) else str(r[1]) for r in data_rows]
-    values = [float(r[0]) for r in data_rows]
+
+    labels = [m.metric_date.strftime("%m/%d") for m in metrics]
+    values = [m.value for m in metrics]
 
     notes = db.execute(
-        select(CoachNote.coach_name, CoachNote.text, CoachNote.created_at)
+        select(CoachNote.text, CoachNote.created_at)
         .where(CoachNote.player_id == player_id)
         .order_by(CoachNote.created_at.desc())
+        .limit(50)
     ).all()
-    coach_notes = [{"coach_name": n[0], "text": n[1], "created_at": n[2].strftime("%Y-%m-%d %H:%M")} for n in notes]
+    coach_notes = [{"text": t, "created_at": c} for t, c in notes]
 
-    drills_rows = db.execute(
-        select(Drill.title, Drill.video_url, DrillAssignment.note)
-        .join(DrillAssignment, Drill.id == DrillAssignment.drill_id)
-        .where(DrillAssignment.player_id == player_id)
-        .order_by(DrillAssignment.id.desc())
+    drills = db.execute(
+        select(Drill.title, Drill.file_path, Drill.created_at)
+        .where(Drill.player_id == player_id)
+        .order_by(Drill.created_at.desc())
+        .limit(50)
     ).all()
-    drills = [{"title": d[0], "video_url": d[1], "note": d[2]} for d in drills_rows]
+    drills_list = [{"title": t, "file_path": f, "created_at": c} for t, f, c in drills]
 
     ctx = {
         "request": request,
-        "player": {"id": player.id, "name": player.name, "photo_url": player.photo_url, "login_code": player.login_code},
+        "session": request.session,
+        "player": {
+            "id": player.id,
+            "name": player.name,
+            "photo_url": player.photo_url,
+            "phone": player.phone,
+            "login_code": player.login_code,
+        },
         "chart_labels": labels,
         "chart_values": values,
         "coach_notes": coach_notes,
-        "drills": drills,
-        "flash": request.session.get("flash"),
+        "drills": drills_list,
+        "flash": request.session.pop("flash", None),
     }
-    return render_first_existing(TEMPLATE_PLAYER_CANDIDATES, ctx)
+    return render_first_existing(TEMPLATE_PLAYER_DETAIL_CANDIDATES, ctx)
 
-# Seed for quick testing
-@app.post("/dev/seed")
-def dev_seed(db: Session = Depends(get_db)):
-    if not db.scalar(select(func.count()).select_from(Instructor)):
-        db.add(Instructor(name="Coach Demo", login_code="DEFAULT"))
-    if not db.scalar(select(func.count()).select_from(Player)):
-        db.add_all([
-            Player(name="Ava Martinez", age_group="13-15"),
-            Player(name="Liam Johnson", age_group="10-12"),
-            Player(name="Mia Lee", age_group="16-18"),
-        ])
-    db.commit()
-    p = db.scalar(select(Player).order_by(Player.id.asc()))
-    if p and not db.scalar(select(func.count()).select_from(ExitMetric).where(ExitMetric.player_id == p.id)):
-        now = datetime.now(timezone.utc)
-        for i, v in enumerate([68.2, 70.1, 72.5, 74.0, 75.8]):
-            db.add(ExitMetric(player_id=p.id, value=v, created_at=now.replace(hour=12, minute=i)))
+# -------------------- Create Player / Upload Photo ----------------------------
+
+@app.post("/player/create")
+async def create_player(
+    request: Request,
+    name: str = Form(...),
+    login_code: str = Form(...),
+    phone: Optional[str] = Form(None),
+    photo: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+):
+    instructor_id = ensure_instructor_in_session(request, db)
+
+    photo_url = None
+    if photo:
+        saved = file_save(photo, "player_photos")
+        if saved:
+            photo_url = saved
+
+    # create
+    p = Player(
+        name=name.strip(),
+        login_code=login_code.strip(),
+        phone=(phone or "").strip() or None,
+        photo_url=photo_url,
+        instructor_id=instructor_id,
+    )
+    db.add(p)
+    try:
         db.commit()
-    return {"ok": True}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not create player: {e}")
+    request.session["flash"] = f"Player {p.name} created."
+    return RedirectResponse("/instructor", status_code=HTTP_302_FOUND)
 
-# Friendly global 500 for Render logs
-@app.exception_handler(Exception)
-async def all_exception_handler(request: Request, exc: Exception):
-    import traceback
-    print("----- Unhandled Exception -----")
-    print(traceback.format_exc())
-    return PlainTextResponse("Internal Server Error", status_code=500)
+# -------------------- Star / Unstar (My Clients) ------------------------------
+
+@app.post("/player/{player_id}/star")
+def toggle_star(player_id: int, request: Request, db: Session = Depends(get_db)):
+    instructor_id = ensure_instructor_in_session(request, db)
+
+    fav = db.scalar(
+        select(Favorite).where(
+            Favorite.instructor_id == instructor_id,
+            Favorite.player_id == player_id,
+        )
+    )
+    starred = False
+    if fav:
+        # unstar
+        db.delete(fav)
+        db.commit()
+        starred = False
+    else:
+        # star
+        newfav = Favorite(instructor_id=instructor_id, player_id=player_id)
+        db.add(newfav)
+        db.commit()
+        starred = True
+    return JSONResponse({"ok": True, "starred": starred, "player_id": player_id})
+
+# -------------------- Coach Notes --------------------------------------------
+
+@app.post("/player/{player_id}/notes")
+def add_coach_note(player_id: int, request: Request, text: str = Form(...), db: Session = Depends(get_db)):
+    instructor_id = ensure_instructor_in_session(request, db)
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    note = CoachNote(player_id=player_id, instructor_id=instructor_id, text=text.strip())
+    db.add(note)
+    db.commit()
+    request.session["flash"] = "Note added."
+    return RedirectResponse(url=f"/player/{player_id}", status_code=HTTP_302_FOUND)
+
+# -------------------- Upload Drill -------------------------------------------
+
+@app.post("/player/{player_id}/drills")
+async def upload_drill(
+    player_id: int,
+    request: Request,
+    title: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+):
+    instructor_id = ensure_instructor_in_session(request, db)
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    file_path = None
+    if file:
+        saved = file_save(file, "drills")
+        if saved:
+            file_path = saved
+
+    drill = Drill(player_id=player_id, instructor_id=instructor_id, title=title.strip(), file_path=file_path)
+    db.add(drill)
+    db.commit()
+    request.session["flash"] = "Drill uploaded."
+    return RedirectResponse(url=f"/player/{player_id}", status_code=HTTP_302_FOUND)
+
+# -------------------- Text Player (Twilio optional) --------------------------
+
+def _twilio_send(to_phone: str, body: str) -> bool:
+    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
+        return False
+    try:
+        from twilio.rest import Client
+        client = Client(TWILIO_SID, TWILIO_TOKEN)
+        client.messages.create(to=to_phone, from_=TWILIO_FROM, body=body)
+        return True
+    except Exception:
+        return False
+
+@app.post("/player/{player_id}/text")
+def text_player(player_id: int, request: Request, message: str = Form(...), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    ok = False
+    if player.phone:
+        ok = _twilio_send(player.phone, message.strip())
+
+    if ok:
+        request.session["flash"] = f"Text sent to {player.name}."
+    else:
+        # Soft-fail: no creds or phone; still show a friendly flash
+        request.session["flash"] = "Text service not configured or player has no phone number."
+
+    return RedirectResponse(url=f"/player/{player_id}", status_code=HTTP_302_FOUND)
+
+# -------------------- Add quick metric point (for demo/testing) --------------
+
+@app.post("/player/{player_id}/metric")
+def add_metric(player_id: int, request: Request, value: int = Form(...), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    m = PlayerMetric(player_id=player_id, value=int(value))
+    db.add(m)
+    db.commit()
+    request.session["flash"] = "Metric added."
+    return RedirectResponse(url=f"/player/{player_id}", status_code=HTTP_302_FOUND)
+
+# -------------------- Health / Root helpers ----------------------------------
+
+@app.head("/", response_class=PlainTextResponse)
+def head_root():
+    return PlainTextResponse("OK", status_code=200)
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz():
+    return PlainTextResponse("ok")
