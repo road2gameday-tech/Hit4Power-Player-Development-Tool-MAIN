@@ -42,7 +42,7 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
+templates.env.globals["now"] = datetime.utcnow
 # ------------------------------------------------------------------------------
 # DB
 # ------------------------------------------------------------------------------
