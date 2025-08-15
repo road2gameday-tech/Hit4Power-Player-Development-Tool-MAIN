@@ -1,48 +1,42 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ title or "Hit4Power" }}</title>
-    <link rel="stylesheet" href="/static/css/style.css" />
-    <script defer src="/static/js/main.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>{% block title %}{{ title or 'Hit4Power' }}{% endblock %}</title>
+
+    <!-- CSS: make sure your stylesheet exists at app/static/styles.css -->
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}" />
   </head>
-  <body class="page">
-    <header class="header">
-      <div class="header-left">
-        <a href="/" class="logo-link">
-          <img id="site-logo" src="/static/logos/Hit4PowerMainLogoDark.png" alt="Hit4Power" class="logo"/>
-        </a>
+  <body class="theme">
+    <header class="site-header">
+      <div class="brand">
+        <a href="/">Hit4Power</a>
       </div>
       <nav class="nav">
-        {% if request.session.get('instructor_id') %}
-          <a href="/instructor" class="nav-link">Clients</a>
-        {% endif %}
-        {% if request.session.get('player_id') %}
-          <a href="/dashboard" class="nav-link">My Dashboard</a>
-        {% endif %}
-        {% if request.session.get('player_id') or request.session.get('instructor_id') %}
-          <a href="/logout" class="nav-link btn btn-outline-red">Logout</a>
-        {% endif %}
-        <button id="theme-toggle" class="nav-link btn btn-ghost" title="Toggle theme">Theme</button>
+        <a href="{{ instagram_url }}" target="_blank" rel="noopener">Instagram</a>
+        <a href="{{ website_url }}" target="_blank" rel="noopener">Website</a>
+        <button type="button" id="toggleThemeBtn">Toggle Theme</button>
+        <a href="/logout">Logout</a>
       </nav>
     </header>
 
     <main class="container">
-      {% set flash = pop_flash(request) %}
-      {% if flash %}
-        <div class="flash">{{ flash }}</div>
-      {% endif %}
       {% block content %}{% endblock %}
     </main>
 
-    <footer class="footer">
-      <div class="spacer"></div>
-      <div class="footer-actions">
-        <a class="btn btn-red" href="https://www.instagram.com/hit4.power/" target="_blank" rel="noopener">Instagram</a>
-        <a class="btn btn-red" href="https://www.hit4power.com/" target="_blank" rel="noopener">Website</a>
-      </div>
+    <footer class="site-footer">
+      <small>© {{ now().year }} Hit4Power</small>
+      <span class="spacer">•</span>
+      <a href="{{ instagram_url }}" target="_blank" rel="noopener">Instagram</a>
+      <span class="spacer">•</span>
+      <a href="{{ website_url }}" target="_blank" rel="noopener">Website</a>
     </footer>
+
+    <!-- JS: make sure your script exists at app/static/app.js -->
+    <script src="{{ url_for('static', path='app.js') }}" defer></script>
   </body>
 </html>
