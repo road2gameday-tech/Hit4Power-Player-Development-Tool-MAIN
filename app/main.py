@@ -1,53 +1,65 @@
-import os
+import os, shutil
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Optional, List
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Form, Body
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import FastAPI, Request, Depends, HTTPException, Body
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from sqlalchemy import (
-    create_engine, String, Integer, DateTime, Float, Boolean, ForeignKey, UniqueConstraint, select, func
+    create_engine, String, Integer, DateTime, Float, ForeignKey, select, func
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Mapped, mapped_column, Session
 
-# --------------------------------------------------------------------------------------
-# Basic app setup
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# App & templating (robust paths + assets copied to /static)
+# -----------------------------------------------------------------------------
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY", "dev-secret"), same_site="lax")
 
-# Static & templates
 STATIC_DIR = os.getenv("STATIC_DIR", "static")
 TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "templates")
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
+# make sure common files are available from /static
+for fname in ("style.css", "logo.svg"):
+    src = os.path.join(".", fname)
+    dst = os.path.join(STATIC_DIR, fname)
+    if os.path.exists(src) and not os.path.exists(dst):
+        try:
+            shutil.copyfile(src, dst)
+        except Exception:
+            pass
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-templates = Jinja2Templates(directory=TEMPLATES_DIR)
-# Provide a simple "now()" in templates (used in footers)
+
+# Jinja that searches multiple folders (templates/, app/templates/, and repo root)
+loader = FileSystemLoader([TEMPLATES_DIR, "app/templates", "."])
+env = Environment(loader=loader, autoescape=select_autoescape(["html", "xml"]))
+templates = Jinja2Templates(env=env)
 templates.env.globals["now"] = lambda: datetime.now(timezone.utc)
 
-# --------------------------------------------------------------------------------------
-# Database (SQLite by default; set DATABASE_URL env for Postgres etc.)
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, echo=False, future=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 Base = declarative_base()
 
-# --------------------------------------------------------------------------------------
-# Models (minimal set used by the pages/routes below)
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
 class Instructor(Base):
     __tablename__ = "instructors"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), default="Coach")
-    # simple auth via login code if you need it
     login_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
 
@@ -106,12 +118,12 @@ class DrillAssignment(Base):
     player = relationship("Player")
     drill = relationship("Drill")
 
-# Create tables if they don't exist
+
 Base.metadata.create_all(bind=engine)
 
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # DB dependency
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def get_db() -> Session:
     db = SessionLocal()
     try:
@@ -119,15 +131,22 @@ def get_db() -> Session:
     finally:
         db.close()
 
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------------------------
-def get_instructor_id_from_session(request: Request, db: Session) -> Optional[int]:
-    """Try session, else None."""
-    try:
-        return request.session.get("instructor_id")
-    except Exception:
-        return None
+# -----------------------------------------------------------------------------
+AGE_BUCKETS = ["7-9", "10-12", "13-15", "16-18", "18+"]
+
+def ensure_instructor_in_session(request: Request, db: Session) -> int:
+    """Guarantee there's an instructor_id in session so starring works immediately."""
+    iid = request.session.get("instructor_id")
+    if iid:
+        return iid
+    inst = db.scalar(select(Instructor).where(Instructor.login_code == "DEFAULT"))
+    if not inst:
+        inst = Instructor(name="Coach", login_code="DEFAULT")
+        db.add(inst); db.commit(); db.refresh(inst)
+    request.session["instructor_id"] = inst.id
+    return inst.id
 
 def starred_ids_for_instructor(db: Session, instructor_id: Optional[int]) -> set[int]:
     if not instructor_id:
@@ -135,79 +154,77 @@ def starred_ids_for_instructor(db: Session, instructor_id: Optional[int]) -> set
     rows = db.execute(select(Favorite.player_id).where(Favorite.instructor_id == instructor_id)).all()
     return {r[0] for r in rows}
 
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Routes
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-def root(request: Request):
-    return RedirectResponse(url="/instructor", status_code=302)
+def root():
+    return RedirectResponse("/instructor", status_code=302)
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 @app.get("/instructor", response_class=HTMLResponse)
 def instructor_clients(request: Request, db: Session = Depends(get_db)):
-    """
-    Render the Clients page the template expects:
-    - players: [{id, name, age_group, photo_url, starred}]
-    - instructor_id: current instructor (or None if not logged in)
-    """
-    # If you have real auth, set request.session["instructor_id"] at login time.
-    instructor_id = get_instructor_id_from_session(request, db)
+    # make sure we have someone in session so ⭐ works
+    instructor_id = ensure_instructor_in_session(request, db)
 
-    players = db.execute(select(Player.id, Player.name, Player.age_group, Player.photo_url)).all()
-    players = [{"id": pid, "name": name, "age_group": age, "photo_url": purl, "starred": False}
-               for (pid, name, age, purl) in players]
+    rows = db.execute(select(Player.id, Player.name, Player.age_group, Player.photo_url)).all()
+    players = [{"id": pid, "name": name, "age_group": age or "", "photo_url": purl, "starred": False}
+               for (pid, name, age, purl) in rows]
 
     starred = starred_ids_for_instructor(db, instructor_id)
     for p in players:
         p["starred"] = p["id"] in starred
 
-    return templates.TemplateResponse(
-        "instructor_players.html",
-        {"request": request, "players": players, "instructor_id": instructor_id, "flash": request.session.get("flash")}
-    )
+    # build grouped map for templates that show columns per age group
+    grouped = {k: [] for k in AGE_BUCKETS}
+    for p in players:
+        key = p["age_group"] if p["age_group"] in grouped else AGE_BUCKETS[-1]  # default to 18+
+        grouped[key].append(p)
 
-class ToggleStarBody(BaseModel):
-    instructor_id: int
+    my_clients = [p for p in players if p["starred"]]
+
+    ctx = {
+        "request": request,
+        "players": players,
+        "grouped": grouped,
+        "my_clients": my_clients,
+        "age_buckets": AGE_BUCKETS,
+        "instructor_id": instructor_id,
+        "flash": request.session.get("flash"),
+    }
+    return templates.TemplateResponse("instructor_players.html", ctx)
 
 @app.post("/api/players/{player_id}/toggle_star")
-def toggle_star(player_id: int, payload: ToggleStarBody = Body(...), db: Session = Depends(get_db)):
-    """
-    Toggle a player's 'favorite' for an instructor.
-    Returns: { "starred": true/false }
-    """
-    # validate player/instructor exist
-    instr = db.get(Instructor, payload.instructor_id)
+def toggle_star(player_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
+    instructor_id = payload.get("instructor_id")
+    if not instructor_id:
+        raise HTTPException(status_code=400, detail="instructor_id required")
+    instr = db.get(Instructor, instructor_id)
     if not instr:
         raise HTTPException(status_code=404, detail="Instructor not found")
     player = db.get(Player, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    existing = db.get(Favorite, {"instructor_id": payload.instructor_id, "player_id": player_id})
+    existing = db.get(Favorite, {"instructor_id": instructor_id, "player_id": player_id})
     if existing:
         db.delete(existing)
         db.commit()
         return {"starred": False}
     else:
-        fav = Favorite(instructor_id=payload.instructor_id, player_id=player_id)
-        db.add(fav)
-        db.commit()
+        fav = Favorite(instructor_id=instructor_id, player_id=player_id)
+        db.add(fav); db.commit()
         return {"starred": True}
 
 @app.get("/player/{player_id}", response_class=HTMLResponse)
 def player_dashboard(player_id: int, request: Request, db: Session = Depends(get_db)):
-    """
-    Render the player dashboard (used by /instructor page links).
-    Provides:
-      - player
-      - chart_labels & chart_values for Exit Velocity (small red line in UI)
-      - coach_notes (latest first)
-      - drills (assigned with optional note)
-    """
     player = db.get(Player, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # Exit Velocity series (last 20 by time)
     data_rows = db.execute(
         select(ExitMetric.value, ExitMetric.created_at)
         .where(ExitMetric.player_id == player_id)
@@ -217,7 +234,6 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     labels = [r[1].strftime("%m/%d") if isinstance(r[1], datetime) else str(r[1]) for r in data_rows]
     values = [float(r[0]) for r in data_rows]
 
-    # Coach notes
     notes = db.execute(
         select(CoachNote.coach_name, CoachNote.text, CoachNote.created_at)
         .where(CoachNote.player_id == player_id)
@@ -225,7 +241,6 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
     ).all()
     coach_notes = [{"coach_name": n[0], "text": n[1], "created_at": n[2].strftime("%Y-%m-%d %H:%M")} for n in notes]
 
-    # Assigned drills
     drills_rows = db.execute(
         select(Drill.title, Drill.video_url, DrillAssignment.note)
         .join(DrillAssignment, Drill.id == DrillAssignment.drill_id)
@@ -247,21 +262,17 @@ def player_dashboard(player_id: int, request: Request, db: Session = Depends(get
         },
     )
 
-# --------------------------------------------------------------------------------------
-# (Optional) Lightweight seed route so you have something to click during testing.
-# Remove in production.
-# --------------------------------------------------------------------------------------
+# Simple seed so you have data quickly (remove in prod)
 @app.post("/dev/seed")
 def dev_seed(db: Session = Depends(get_db)):
     if not db.scalar(select(func.count()).select_from(Instructor)):
-        db.add(Instructor(name="Coach Demo", login_code="COACH1"))
+        db.add(Instructor(name="Coach Demo", login_code="DEFAULT"))
     if not db.scalar(select(func.count()).select_from(Player)):
-        players = [
+        db.add_all([
             Player(name="Ava Martinez", age_group="13-15"),
             Player(name="Liam Johnson", age_group="10-12"),
             Player(name="Mia Lee", age_group="16-18"),
-        ]
-        db.add_all(players)
+        ])
     db.commit()
     # add a few exit metrics for first player
     p = db.scalar(select(Player).order_by(Player.id.asc()))
@@ -271,3 +282,11 @@ def dev_seed(db: Session = Depends(get_db)):
             db.add(ExitMetric(player_id=p.id, value=v, created_at=now.replace(hour=12, minute=i)))
         db.commit()
     return {"ok": True}
+
+# Catch-all 500 that logs to server (for Render “Internal Server Error” screens)
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    import traceback
+    print("----- Unhandled Exception -----")
+    print(traceback.format_exc())
+    return PlainTextResponse("Internal Server Error", status_code=500)
